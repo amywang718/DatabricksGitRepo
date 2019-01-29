@@ -29,6 +29,16 @@ print(str(loan_stats.count()) + " loans opened by Lending Club...")
 
 # COMMAND ----------
 
+# MAGIC %sql
+# MAGIC select * from amy.loanstats_2012_2017 limit 100
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC describe formatted amy.loanstats_2012_2017
+
+# COMMAND ----------
+
 display(loan_stats)
 
 # COMMAND ----------
@@ -73,6 +83,14 @@ display(loan_stats)
 
 # COMMAND ----------
 
+# loan_stats.write.parquet("dbfs:/path/to/data")
+
+# COMMAND ----------
+
+# MAGIC %fs ls /mnt/
+
+# COMMAND ----------
+
 display(loan_stats.groupBy("addr_state").agg((count(col("annual_inc"))).alias("ratio")))
 
 # COMMAND ----------
@@ -89,6 +107,7 @@ display(loan_stats.select("net","verification_status","int_rate", "revol_util", 
 print("------------------------------------------------------------------------------------------------")
 print("Setting variables to predict bad loans")
 myY = "bad_loan"
+
 categoricals = ["term", "home_ownership", "purpose", "addr_state",
                 "verification_status","application_type"]
 numerics = ["loan_amnt","emp_length", "annual_inc","dti",
@@ -100,8 +119,74 @@ loan_stats2 = loan_stats.select(myX + [myY, "int_rate", "net", "issue_year"])
 train = loan_stats2.filter(loan_stats2.issue_year <= 2015).cache()
 valid = loan_stats2.filter(loan_stats2.issue_year > 2015).cache()
 
+train.registerTempTable("train")
+valid.registerTempTable("valid")
 # train.count()
 # valid.count()
+
+# COMMAND ----------
+
+# valid.write.saveAsTable("amy.scoring_table", format = "parquet", path = "dbfs:/amy/loans_valid", mode = "overwrite")
+
+# COMMAND ----------
+
+# MAGIC %scala
+# MAGIC // import ml.dmlc.xgboost4j.scala.spark.{XGBoost,XGBoostEstimator}
+# MAGIC // import org.apache.spark.ml.feature._
+# MAGIC // import org.apache.spark.ml._
+# MAGIC 
+# MAGIC // val trainSc = table("train").cache()
+# MAGIC // val validSc = table("valid").cache()
+# MAGIC 
+# MAGIC // val categoricals = Array("term", "home_ownership", "purpose", "addr_state",
+# MAGIC //                 "verification_status","application_type")
+# MAGIC // val numerics = Array("loan_amnt","emp_length", "annual_inc","dti",
+# MAGIC //             "delinq_2yrs","revol_util","total_acc",
+# MAGIC //             "credit_length_in_years")
+# MAGIC 
+# MAGIC 
+# MAGIC // val indexers = categoricals.map(x=> new StringIndexer().setInputCol(x).setOutputCol(x + "_idx").setHandleInvalid("keep"))
+# MAGIC // val oneHotEncoders = categoricals.map(x=> new OneHotEncoder().setInputCol(x + "_idx").setOutputCol(x + "_class"))
+# MAGIC // val imputers = new Imputer().setInputCols(numerics).setOutputCols(numerics)
+# MAGIC // val featureCols = categoricals.map(c =>c + "_class").toArray ++ numerics
+# MAGIC 
+# MAGIC // val assembler =  new VectorAssembler()
+# MAGIC //   .setInputCols(featureCols)
+# MAGIC //   .setOutputCol("features")
+# MAGIC // val scaler = new StandardScaler().setInputCol("features").setOutputCol("scaled_features").setWithMean(true).setWithStd(true)
+# MAGIC // val labelIndexer = new StringIndexer().setInputCol("bad_loan").setOutputCol("label")
+# MAGIC // val pipelineAry = indexers ++ oneHotEncoders ++ Array(imputers,assembler,scaler,labelIndexer)
+# MAGIC 
+# MAGIC // val xgboostEstimator = new XGBoostEstimator(
+# MAGIC //         Map[String, Any]("num_round" -> 5, "objective" -> "binary:logistic", "nworkers" -> 16,"nthreads" -> 4))
+# MAGIC // val xgBoostModel =  new Pipeline().setStages(pipelineAry ++ Array(xgboostEstimator)).fit(trainSc)
+
+# COMMAND ----------
+
+# MAGIC %scala 
+# MAGIC // val xgboostEstimator = new XGBoostEstimator(
+# MAGIC //         Map[String, Any]("num_round" -> 5, "objective" -> "binary:logistic", "nworkers" -> 16,"nthreads" -> 4))
+# MAGIC // val xgBoostModel =  new Pipeline().setStages(pipelineAry ++ Array(xgboostEstimator)).fit(trainSc)
+# MAGIC // val xgboostEstimator = new XGBoostEstimator(
+# MAGIC //         Map[String, Any]("num_round" -> 5, "objective" -> "rank:pairwise", "nworkers" -> 16,"nthreads" -> 4))
+# MAGIC // val xgBoostModel =  new Pipeline().setStages(pipelineAry ++ Array(xgboostEstimator)).fit(trainSc)
+
+# COMMAND ----------
+
+# MAGIC %scala
+# MAGIC // val scores = xgBoostModel.transform(validSc)
+# MAGIC // display(scores)
+
+# COMMAND ----------
+
+# MAGIC %scala
+# MAGIC // val validSc = table("valid").cache()
+# MAGIC // display(xgBoostModel.transform(validSc))
+
+# COMMAND ----------
+
+# MAGIC %scala
+# MAGIC // xgBoostModel.save("dbfs:/amy/xgboost_model")
 
 # COMMAND ----------
 
@@ -247,12 +332,21 @@ display(glm_valid.groupBy("label", "prediction").agg((sum(col("net"))).alias("su
 
 # COMMAND ----------
 
+sql_table = glm_valid.groupBy("label", "prediction").agg((sum(col("net"))).alias("sum_net"))
+sql_table.registerTempTableView("predictions")
+
+# COMMAND ----------
+
+cvModel.bestModel.save("dbfs:/amy/lrModel")
+
+# COMMAND ----------
+
 # from dbmlModelExport import ModelExport
 # ModelExport.exportModel(cvModel.bestModel, "dbfs:/amy/myPipeline")
 
 # COMMAND ----------
 
-# MAGIC %fs ls dbfs:/amy/myPipeline/
+# %fs ls dbfs:/amy/myPipeline/
 
 # COMMAND ----------
 
@@ -261,4 +355,34 @@ display(glm_valid.groupBy("label", "prediction").agg((sum(col("net"))).alias("su
 
 # COMMAND ----------
 
-display(loan_stats)
+# display(loan_stats)
+
+# COMMAND ----------
+
+from pyspark.ml.clustering import KMeans
+
+# Trains a k-means model.
+kmeans = KMeans().setK(3).setSeed(1)
+pipeline = Pipeline(stages=model_matrix_stages+[scaler]+[kmeans])
+
+model = pipeline.fit(valid)
+
+# # Make predictions
+# predictions = model.transform(dataset)
+
+# # Evaluate clustering by computing Silhouette score
+# evaluator = ClusteringEvaluator()
+
+# silhouette = evaluator.evaluate(predictions)
+# print("Silhouette with squared euclidean distance = " + str(silhouette))
+
+# # Shows the result.
+# centers = model.clusterCenters()
+# print("Cluster Centers: ")
+# for center in centers:
+#     print(center)
+
+
+# COMMAND ----------
+
+model.save("dbfs:/amy/cluster_model")
