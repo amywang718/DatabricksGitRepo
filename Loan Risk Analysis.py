@@ -24,22 +24,85 @@
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC 
+# MAGIC ### Source library from github
+
+# COMMAND ----------
+
+# MAGIC %sh cd /dbfs/amy/lib/DatabricksGitRepo; git pull
+
+# COMMAND ----------
+
+import sys
+
+libpath = "/dbfs/amy/lib/DatabricksGitRepo/lib"
+sys.path.insert(0, libpath)
+
+# COMMAND ----------
+
+import tabulate as tb
+
+table = [["Sun",696000,1989100000],["Earth",6371,5973.6],
+         ["Moon",1737,73.5],["Mars",3390,641.85]]
+print(tb.tabulate(table))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Set up streaming data source
+
+# COMMAND ----------
+
 loan_stats = spark.table("amy.loanstats_2012_2017")
+schema = loan_stats.schema
+
+loan_stats.write.format("delta").save("/delta/loanstats/")
+
+# COMMAND ----------
+
+streaming_df = spark.readStream\
+  .option("maxFilesPerTrigger", 10)\
+  .format("delta")\
+  .load("/delta/loanstats/")\
+  .writeStream\
+  .partitionBy("issue_d")\
+  .format("delta")\
+  .outputMode("append")\
+  .option("checkpointLocation", "/delta/loanstats_table/_checkpoint_directory")\
+  .start("/delta/loanstats_table") 
+
+# COMMAND ----------
+
+# MAGIC %fs ls /delta/loanstats_table
+
+# COMMAND ----------
+
+# %sql
+# use amy;
+# create table loans
+# using delta
+# location "/delta/loanstats_table"
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Run Analysis on Loans Data
+
+# COMMAND ----------
+
+loan_stats = spark.table("amy.loans")
+# loan_stats = spark.table("amy.loanstats_2012_2017")
 print(str(loan_stats.count()) + " loans opened by Lending Club...")
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC select * from amy.loanstats_2012_2017 limit 100
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC describe formatted amy.loanstats_2012_2017
-
-# COMMAND ----------
-
 display(loan_stats)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC describe formatted amy.loans
 
 # COMMAND ----------
 
@@ -80,14 +143,6 @@ loan_stats = loan_stats.withColumn('net', round( loan_stats.total_pymnt - loan_s
 # COMMAND ----------
 
 display(loan_stats)
-
-# COMMAND ----------
-
-# loan_stats.write.parquet("dbfs:/path/to/data")
-
-# COMMAND ----------
-
-# MAGIC %fs ls /mnt/
 
 # COMMAND ----------
 
@@ -153,29 +208,13 @@ valid.registerTempTable("valid")
 # MAGIC // val assembler =  new VectorAssembler()
 # MAGIC //   .setInputCols(featureCols)
 # MAGIC //   .setOutputCol("features")
-# MAGIC // val scaler = new StandardScaler().setInputCol("features").setOutputCol("scaled_features").setWithMean(true).setWithStd(true)
+# MAGIC // val scaler = new StandardScaler().setInputCol("features").setOutputCol("features").setWithMean(true).setWithStd(true)
 # MAGIC // val labelIndexer = new StringIndexer().setInputCol("bad_loan").setOutputCol("label")
 # MAGIC // val pipelineAry = indexers ++ oneHotEncoders ++ Array(imputers,assembler,scaler,labelIndexer)
 # MAGIC 
 # MAGIC // val xgboostEstimator = new XGBoostEstimator(
 # MAGIC //         Map[String, Any]("num_round" -> 5, "objective" -> "binary:logistic", "nworkers" -> 16,"nthreads" -> 4))
 # MAGIC // val xgBoostModel =  new Pipeline().setStages(pipelineAry ++ Array(xgboostEstimator)).fit(trainSc)
-
-# COMMAND ----------
-
-# MAGIC %scala 
-# MAGIC // val xgboostEstimator = new XGBoostEstimator(
-# MAGIC //         Map[String, Any]("num_round" -> 5, "objective" -> "binary:logistic", "nworkers" -> 16,"nthreads" -> 4))
-# MAGIC // val xgBoostModel =  new Pipeline().setStages(pipelineAry ++ Array(xgboostEstimator)).fit(trainSc)
-# MAGIC // val xgboostEstimator = new XGBoostEstimator(
-# MAGIC //         Map[String, Any]("num_round" -> 5, "objective" -> "rank:pairwise", "nworkers" -> 16,"nthreads" -> 4))
-# MAGIC // val xgBoostModel =  new Pipeline().setStages(pipelineAry ++ Array(xgboostEstimator)).fit(trainSc)
-
-# COMMAND ----------
-
-# MAGIC %scala
-# MAGIC // val scores = xgBoostModel.transform(validSc)
-# MAGIC // display(scores)
 
 # COMMAND ----------
 
@@ -198,15 +237,17 @@ from pyspark.ml.evaluation import BinaryClassificationEvaluator
 from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 
 ## Current possible ways to handle categoricals in string indexer is 'error', 'keep', and 'skip'
-indexers = map(lambda c: StringIndexer(inputCol=c, outputCol=c+"_idx", handleInvalid = 'keep'), categoricals)
-ohes = map(lambda c: OneHotEncoder(inputCol=c + "_idx", outputCol=c+"_class"),categoricals)
+# numerics = []
+# categoricals = []
+labelCol = "bad_loan"
+indexers = list(map(lambda c: StringIndexer(inputCol=c, outputCol=c+"_idx", handleInvalid = 'keep'), categoricals))
+ohes = list(map(lambda c: OneHotEncoder(inputCol=c + "_idx", outputCol=c+"_class"), categoricals))
 imputers = Imputer(inputCols = numerics, outputCols = numerics)
-
-featureCols = map(lambda c: c+"_class", categoricals) + numerics
+featureCols = list(map(lambda c: c+"_class", categoricals) ) + numerics
 model_matrix_stages = indexers + ohes + \
                       [imputers] + \
                       [VectorAssembler(inputCols=featureCols, outputCol="features"), \
-                       StringIndexer(inputCol="bad_loan", outputCol="label")]
+                       StringIndexer(inputCol= labelCol, outputCol="label")]
 
 scaler = StandardScaler(inputCol="features",
                         outputCol="scaledFeatures",
@@ -244,31 +285,35 @@ lr.setThreshold(bestThreshold)
 
 # COMMAND ----------
 
-from pyspark.ml.classification import GBTClassifier
+# MAGIC %md ### Other model builds
 
-indexers = map(lambda c: StringIndexer(inputCol=c, outputCol=c+"_idx", handleInvalid = 'keep'), categoricals)
-imputers = Imputer(inputCols = numerics, outputCols = numerics)
-featureCols = map(lambda c: c+"_idx", categoricals) + numerics
+# COMMAND ----------
 
-# Define vector assemblers
-model_matrix_stages = indexers + \
-                      [imputers] + \
-                      [VectorAssembler(inputCols=featureCols, outputCol="features"), \
-                       StringIndexer(inputCol="bad_loan", outputCol="label")]
+# from pyspark.ml.classification import GBTClassifier
 
-# Define a GBT model.
-gbt = GBTClassifier(featuresCol="features",
-                    labelCol="label",
-                    lossType = "logistic",
-                    maxBins = 52,
-                    maxIter=20,
-                    maxDepth=5)
+# indexers = list(map(lambda c: StringIndexer(inputCol=c, outputCol=c+"_idx", handleInvalid = 'keep'), categoricals))
+# imputers = Imputer(inputCols = numerics, outputCols = numerics)
+# featureCols = list(map(lambda c: c+"_class", categoricals) ) + numerics
 
-# Chain indexer and GBT in a Pipeline
-pipeline = Pipeline(stages=model_matrix_stages+[gbt])
+# # Define vector assemblers
+# model_matrix_stages = indexers + \
+#                       [imputers] + \
+#                       [VectorAssembler(inputCols=featureCols, outputCol="features"), \
+#                        StringIndexer(inputCol="bad_loan", outputCol="label")]
 
-# Train model.  This also runs the indexer.
-gbt_model = pipeline.fit(train)
+# # Define a GBT model.
+# gbt = GBTClassifier(featuresCol="features",
+#                     labelCol="label",
+#                     lossType = "logistic",
+#                     maxBins = 52,
+#                     maxIter=20,
+#                     maxDepth=5)
+
+# # Chain indexer and GBT in a Pipeline
+# pipeline = Pipeline(stages=model_matrix_stages+[gbt])
+
+# # Train model.  This also runs the indexer.
+# gbt_model = pipeline.fit(train)
 
 # COMMAND ----------
 
@@ -329,11 +374,6 @@ print "GBT Validation AUC :" + str(auc(gbt_valid))
 # COMMAND ----------
 
 display(glm_valid.groupBy("label", "prediction").agg((sum(col("net"))).alias("sum_net")))
-
-# COMMAND ----------
-
-sql_table = glm_valid.groupBy("label", "prediction").agg((sum(col("net"))).alias("sum_net"))
-sql_table.registerTempTableView("predictions")
 
 # COMMAND ----------
 
